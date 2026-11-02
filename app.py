@@ -210,7 +210,7 @@ customer_tab, owner_tab = st.tabs(['Customer View', 'Owner View'])
 
 with customer_tab:
     st.subheader('Tell us about your experience')
-    st.write('How would you rate your shopping experience? (Optional)')
+    st.write('How would you rate your shopping experience?')
     # st.feedback('stars') displays clickable stars and returns 0–4, or None
     # when no rating is selected. Convert to the stored 1–5 rating scale.
     if 'rating_widget_version' not in st.session_state:
