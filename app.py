@@ -124,6 +124,28 @@ def classify_comment(comment):
     return result
 
 
+def apply_rating_sentiment_review(rating, classification):
+    """Flag clear rating/text conflicts without changing the customer's original rating.
+
+    The LLM classifies the written comment independently of star ratings.
+    Missing ratings or sentiment, and three-star ratings, are not flagged here.
+    Existing LLM manual-review reasons are preserved.
+    """
+    if rating is None or classification.get('sentiment') is None:
+        return classification
+
+    sentiment = classification['sentiment']
+    conflict = ((rating >= 4 and sentiment == 'negative') or
+                (rating <= 2 and sentiment == 'positive'))
+    if conflict:
+        classification['needs_manual_review'] = True
+        reason = 'Star rating conflicts with written sentiment.'
+        existing = classification.get('review_reason', '').strip()
+        if reason not in existing:
+            classification['review_reason'] = (existing + ' ' + reason).strip()
+    return classification
+
+
 def use_supabase():
     return bool(secret('SUPABASE_URL') and secret('SUPABASE_SERVICE_ROLE_KEY'))
 
@@ -183,37 +205,53 @@ def load_feedback():
 st.set_page_config(page_title='Clothing Customer Feedback', page_icon='🛍️', layout='wide')
 st.title('Clothing Customer Feedback')
 st.caption('What drives customer satisfaction and dissatisfaction, and where should the retailer improve?')
-page = st.sidebar.radio('Select a page', ['Customer feedback', 'Owner dashboard'])
+# Match the pizza-feedback example's two-view layout with horizontal tabs.
+customer_tab, owner_tab = st.tabs(['Customer View', 'Owner View'])
 
-if page == 'Customer feedback':
+with customer_tab:
     st.subheader('Tell us about your experience')
+    st.write('How would you rate your shopping experience? (Optional)')
+    # st.feedback('stars') displays clickable stars and returns 0–4, or None
+    # when no rating is selected. Convert to the stored 1–5 rating scale.
+    if 'rating_widget_version' not in st.session_state:
+        st.session_state.rating_widget_version = 0
+    rating_choice = st.feedback('stars', key=f'rating_stars_{st.session_state.rating_widget_version}')
+    rating = (rating_choice + 1) if rating_choice is not None else None
+    if rating is not None:
+        st.caption(f'Selected rating: {rating} out of 5 stars')
+    else:
+        st.caption('No rating selected. You can submit a written comment without a rating.')
+
     with st.form('feedback_form', clear_on_submit=True):
-        has_rating = st.checkbox('Include a star rating', value=True)
-        rating = st.select_slider('Star rating', options=[1, 2, 3, 4, 5], value=3, disabled=not has_rating)
         comment = st.text_area('Written feedback (optional)', max_chars=3000,
                                placeholder='What worked well? What could we improve?')
         submitted = st.form_submit_button('Submit feedback', type='primary')
+    if st.session_state.pop('feedback_saved', False):
+        st.success('Thank you! Your feedback has been saved.')
     if submitted:
         comment = comment.strip()
-        if not comment and not has_rating:
+        if not comment and rating is None:
             st.error('Please provide a star rating, written feedback, or both.')
         else:
             try:
                 classification = (classify_comment(comment) if comment else {
                     'category': None, 'sentiment': None,
                     'needs_manual_review': False, 'review_reason': ''})
+                classification = apply_rating_sentiment_review(rating, classification)
                 record = {
                     'created_at': datetime.now(timezone.utc).isoformat(),
-                    'rating': rating if has_rating else None,
+                    'rating': rating,
                     'comment': comment or None,
                     **classification,
                 }
                 save_feedback(record)
-                st.success('Thank you! Your feedback has been saved.')
+                st.session_state.rating_widget_version += 1
+                st.session_state.feedback_saved = True
+                st.rerun()
             except (requests.RequestException, ValueError, KeyError, RuntimeError, json.JSONDecodeError) as exc:
                 st.error('Unable to classify or save your feedback. Please try again. ' + str(exc))
 
-else:
+with owner_tab:
     st.subheader('Owner dashboard')
     if not use_supabase():
         st.info('Demo storage: local SQLite. For durable storage on Streamlit Cloud, configure Supabase (see README).')
