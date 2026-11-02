@@ -378,6 +378,6 @@ with owner_tab:
 
     st.divider()
     st.subheader('Manage feedback data')
-    st.caption('Permanently remove all saved submissions. Confirmation is required.')
+    st.caption('Permanently remove all saved comment submissions.')
     if st.button('Clear all feedback', type='secondary'):
         confirm_clear_feedback()
