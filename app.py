@@ -271,8 +271,8 @@ def confirm_clear_feedback():
                 st.rerun()
 
 
-st.set_page_config(page_title='Retail Feedback Insights', page_icon='🛍️', layout='wide')
-st.title('Retail Feedback Insights')
+st.set_page_config(page_title='Apparel Feedback Insights', page_icon='🛍️', layout='wide')
+st.title('Apparel Feedback Insights')
 st.caption('What drives customer satisfaction and dissatisfaction, and where should the retailer improve?')
 # Match the pizza-feedback example's two-view layout with horizontal tabs.
 customer_tab, owner_tab = st.tabs(['Customer View', 'Owner View'])
