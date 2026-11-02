@@ -253,8 +253,6 @@ with customer_tab:
 
 with owner_tab:
     st.subheader('Owner dashboard')
-    if not use_supabase():
-        st.info('Demo storage: local SQLite. For durable storage on Streamlit Cloud, configure Supabase (see README).')
     try:
         df = load_feedback()
     except requests.RequestException as exc:
