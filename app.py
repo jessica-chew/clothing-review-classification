@@ -62,14 +62,23 @@ Sentiment (ONE):
 - A reported problem that was resolved to the customer's satisfaction is not automatically negative.
 - Infer sentiment ONLY from comment text, never from a star rating.
 
-Manual review (boolean):
-True ONLY when equally important multiple categories have no clear primary topic; the
-comment is very vague/confusing/incomplete; sentiment is genuinely contradictory and
-unclear; category is Unclear / Other; or it alleges serious safety, discrimination,
-fraud or other issues requiring human attention. Do NOT flag routine negative feedback,
-clear sarcasm, or merely because a comment mentions a secondary topic.
-If needs_manual_review is true, give a brief review_reason; otherwise use "".
-Never invent facts missing from the comment.
+Manual review and review_type:
+- Classification review: multiple equally central topics with no clearly dominant category;
+  very vague, confusing, or incomplete comments; genuinely contradictory or
+  indeterminate sentiment; or Unclear / Other.
+- Business escalation: a reported product safety hazard or injury; alleged fraud,
+  unauthorized charges, or account/payment security breach; repeated unsuccessful
+  attempts to resolve a significant issue (such as a refund after multiple contacts);
+  alleged discrimination, harassment, or inappropriate conduct; credible threats
+  of violence; or reported exposure of sensitive personal information.
+- Set review_type to "classification" if only classification review applies,
+  "escalation" if only business escalation applies, "both" if both apply,
+  or "none" otherwise. Set needs_manual_review true if and only if review_type
+  is not "none". Supply concise specific review_reason for flagged comments;
+  otherwise review_reason must be empty.
+- Routine complaints, clear sarcasm, and ordinary negative sentiment DO NOT
+  require review on their own. Do not treat customer allegations as established facts.
+- Never invent facts missing from the comment.
 
 Customer comment:
 '''
@@ -81,8 +90,9 @@ SCHEMA = {
         'sentiment': {'type': 'string', 'enum': SENTIMENTS},
         'needs_manual_review': {'type': 'boolean'},
         'review_reason': {'type': 'string'},
+        'review_type': {'type': 'string', 'enum': ['none', 'classification', 'escalation', 'both']},
     },
-    'required': ['category', 'sentiment', 'needs_manual_review', 'review_reason'],
+    'required': ['category', 'sentiment', 'needs_manual_review', 'review_reason', 'review_type'],
     'additionalProperties': False,
 }
 
@@ -92,6 +102,16 @@ def secret(name, default=None):
         return st.secrets.get(name, default)
     except (FileNotFoundError, KeyError):
         return default
+
+
+def add_review_type(classification, review_type):
+    """Combine independent review triggers without discarding earlier reasons."""
+    existing = classification.get('review_type', 'none')
+    if existing == 'both' or (existing != 'none' and existing != review_type):
+        classification['review_type'] = 'both'
+    else:
+        classification['review_type'] = review_type
+    classification['needs_manual_review'] = classification['review_type'] != 'none'
 
 
 def classify_comment(comment):
@@ -118,9 +138,17 @@ def classify_comment(comment):
         raise ValueError('Unexpected category or sentiment returned by Groq')
     if not isinstance(result['needs_manual_review'], bool):
         raise ValueError('Invalid manual-review flag')
+    if result['review_type'] not in ('none', 'classification', 'escalation', 'both'):
+        raise ValueError('Invalid review type')
     if result['category'] == 'Unclear / Other':
-        result['needs_manual_review'] = True
-        result['review_reason'] = result['review_reason'] or 'Insufficiently specific category'
+        add_review_type(result, 'classification')
+        result['review_reason'] = result['review_reason'] or 'Insufficiently specific category.'
+    else:
+        result['needs_manual_review'] = result['review_type'] != 'none'
+    if result['needs_manual_review'] and not result['review_reason'].strip():
+        result['review_reason'] = 'Comment requires human review.'
+    if not result['needs_manual_review']:
+        result['review_reason'] = ''
     return result
 
 
@@ -138,7 +166,7 @@ def apply_rating_sentiment_review(rating, classification):
     conflict = ((rating >= 4 and sentiment == 'negative') or
                 (rating <= 2 and sentiment == 'positive'))
     if conflict:
-        classification['needs_manual_review'] = True
+        add_review_type(classification, 'classification')
         reason = 'Star rating conflicts with written sentiment.'
         existing = classification.get('review_reason', '').strip()
         if reason not in existing:
@@ -171,8 +199,15 @@ def local_connection():
         category TEXT,
         sentiment TEXT,
         needs_manual_review INTEGER NOT NULL DEFAULT 0,
-        review_reason TEXT NOT NULL DEFAULT ''
+        review_reason TEXT NOT NULL DEFAULT '',
+        review_type TEXT NOT NULL DEFAULT 'none'
     )''')
+    # Keep databases created by earlier app versions usable.
+    existing_columns = {row[1] for row in conn.execute('PRAGMA table_info(feedback)')}
+    if 'review_type' not in existing_columns:
+        conn.execute("ALTER TABLE feedback ADD COLUMN review_type TEXT NOT NULL DEFAULT 'none'")
+        # Historical review flags cannot reliably be separated into the new types.
+        conn.execute("UPDATE feedback SET review_type='legacy' WHERE needs_manual_review=1")
     conn.commit()
     return conn
 
@@ -183,8 +218,8 @@ def save_feedback(record):
     else:
         with local_connection() as conn:
             conn.execute('''INSERT INTO feedback
-                (created_at,rating,comment,category,sentiment,needs_manual_review,review_reason)
-                VALUES (:created_at,:rating,:comment,:category,:sentiment,:needs_manual_review,:review_reason)''',
+                (created_at,rating,comment,category,sentiment,needs_manual_review,review_reason,review_type)
+                VALUES (:created_at,:rating,:comment,:category,:sentiment,:needs_manual_review,:review_reason,:review_type)''',
                 {**record, 'needs_manual_review': int(record['needs_manual_review'])})
             conn.commit()
 
@@ -197,7 +232,9 @@ def load_feedback():
         with local_connection() as conn:
             df = pd.read_sql_query('SELECT * FROM feedback ORDER BY created_at DESC', conn)
     if df.empty:
-        return pd.DataFrame(columns=['created_at','rating','comment','category','sentiment','needs_manual_review','review_reason'])
+        return pd.DataFrame(columns=['created_at','rating','comment','category','sentiment','needs_manual_review','review_reason','review_type'])
+    if 'review_type' not in df.columns:
+        df['review_type'] = df['needs_manual_review'].map(lambda x: 'legacy' if x else 'none')
     df['needs_manual_review'] = df['needs_manual_review'].astype(bool)
     return df
 
@@ -236,7 +273,7 @@ with customer_tab:
             try:
                 classification = (classify_comment(comment) if comment else {
                     'category': None, 'sentiment': None,
-                    'needs_manual_review': False, 'review_reason': ''})
+                    'needs_manual_review': False, 'review_reason': '', 'review_type': 'none'})
                 classification = apply_rating_sentiment_review(rating, classification)
                 record = {
                     'created_at': datetime.now(timezone.utc).isoformat(),
@@ -283,18 +320,24 @@ with owner_tab:
         st.caption('Rates describe feedback received, not the satisfaction of all customers. Categories with few comments should be interpreted cautiously.')
 
     st.subheader('Comments requiring manual review')
+    if not manual.empty:
+        type_counts = manual['review_type'].fillna('none').value_counts()
+        st.caption('Review types — ' + ', '.join(
+            f'{name.title()}: {int(type_counts.get(name, 0))}'
+            for name in ('classification', 'escalation', 'both', 'legacy')))
     if manual.empty:
         st.success('No written comments currently require manual review.')
     else:
-        st.dataframe(manual[['created_at', 'rating', 'category', 'sentiment', 'review_reason', 'comment']],
+        st.dataframe(manual[['created_at', 'rating', 'category', 'sentiment', 'review_type', 'review_reason', 'comment']],
                      hide_index=True, use_container_width=True, column_config={
                          'comment': st.column_config.TextColumn('Full comment', width='large'),
                          'review_reason': st.column_config.TextColumn('Reason', width='medium'),
+                         'review_type': st.column_config.TextColumn('Review type'),
                      })
         for _, item in manual.iterrows():
             with st.expander(f"Full comment — {item['created_at']} — {item['category']}"):
                 st.write(item['comment'])
-                st.caption(f"Reason: {item['review_reason']}")
+                st.caption(f"Review type: {item['review_type']}. Reason: {item['review_reason']}")
 
     st.download_button('Download all feedback (CSV)', df.to_csv(index=False).encode('utf-8'),
                        'customer_feedback.csv', 'text/csv')
