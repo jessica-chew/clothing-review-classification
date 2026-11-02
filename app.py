@@ -223,7 +223,7 @@ with customer_tab:
         st.caption('No rating selected. You can submit a written comment without a rating.')
 
     with st.form('feedback_form', clear_on_submit=True):
-        comment = st.text_area('Written feedback (optional)', max_chars=3000,
+        comment = st.text_area('Written feedback', max_chars=3000,
                                placeholder='What worked well? What could we improve?')
         submitted = st.form_submit_button('Submit feedback', type='primary')
     if st.session_state.pop('feedback_saved', False):
