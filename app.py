@@ -239,6 +239,38 @@ def load_feedback():
     return df
 
 
+
+
+def clear_all_feedback():
+    """Permanently delete every stored feedback submission."""
+    if use_supabase():
+        # Supabase PostgREST requires a filter for bulk DELETE requests.
+        # The primary key is a positive integer, so this covers every row.
+        supabase_request('DELETE', '?id=gt.0')
+    else:
+        with local_connection() as conn:
+            conn.execute('DELETE FROM feedback')
+            conn.commit()
+
+
+@st.dialog('Confirm feedback deletion')
+def confirm_clear_feedback():
+    st.warning('This will permanently delete ALL customer feedback and reset the owner dashboard. This cannot be undone.')
+    cancel_col, delete_col = st.columns(2)
+    with cancel_col:
+        if st.button('Cancel', use_container_width=True):
+            st.rerun()
+    with delete_col:
+        if st.button('Yes, delete all feedback', type='primary', use_container_width=True):
+            try:
+                clear_all_feedback()
+            except (requests.RequestException, sqlite3.Error) as exc:
+                st.error(f'Could not delete feedback: {exc}')
+            else:
+                st.session_state['feedback_cleared'] = True
+                st.rerun()
+
+
 st.set_page_config(page_title='Clothing Customer Feedback', page_icon='🛍️', layout='wide')
 st.title('Clothing Customer Feedback')
 st.caption('What drives customer satisfaction and dissatisfaction, and where should the retailer improve?')
@@ -290,6 +322,8 @@ with customer_tab:
 
 with owner_tab:
     st.subheader('Owner dashboard')
+    if st.session_state.pop('feedback_cleared', False):
+        st.success('All feedback has been deleted.')
     try:
         df = load_feedback()
     except requests.RequestException as exc:
@@ -341,3 +375,9 @@ with owner_tab:
 
     st.download_button('Download all feedback (CSV)', df.to_csv(index=False).encode('utf-8'),
                        'customer_feedback.csv', 'text/csv')
+
+    st.divider()
+    st.subheader('Manage feedback data')
+    st.caption('Permanently remove all saved submissions. Confirmation is required.')
+    if st.button('Clear all feedback', type='secondary'):
+        confirm_clear_feedback()
